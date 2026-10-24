@@ -206,22 +206,38 @@ BUDGET_FROM=""
 # whose window has reset is ignored. The max of the live ones is the best lower bound
 # there is. Every record in the fleet dir counts, not just this socket's: the dir is the
 # profile's, and a profile is one account, so a sibling fleet's reading is this account's.
+#   ...UNTIL THE PROFILE'S LOGIN CHANGES. One account's windows never overlap, so two live
+# readings with different `resets` are two accounts, and the old one's figure says nothing
+# about the one in use. Measured: an old window's 99%, frozen in sessions this governor had
+# parked, outvoted a fresh 54-61% and re-parked every worker of four fleets a minute after
+# each hand resume, for the hours until that old window would have reset. So the window is
+# the FRESHEST reading's — not the latest-resetting one, which would hand a switch back to
+# the capped account to the other one — and only readings in it (or with no window to
+# compare, which are fresh by the filter above) take part in the max.
 # Sets BUDGET_PCT and BUDGET_FROM (the session and age of the reading); leaves both
 # empty when no record carries a live figure, and the pane scrape below runs as before.
 mod_budget() {
-  local now f best=""
+  local now f rows="" cur="" best="" dropped=0
   now="$(date +%s)"
-  best="$(for f in "$FLEET_DIR"/*.json; do
+  rows="$(for f in "$FLEET_DIR"/*.json; do
       jq -r --argjson now "$now" '.usage as $u | ($u.limits.five_hour // empty) as $w
         | select(($w.pct | type) == "number")
         | select(if $w.resets then $w.resets > $now else (($u.at // 0) > $now - 600) end)
         | [($w.pct | floor), (.slot // .session_id // "?"), ($now - ($u.at // $now)), ($w.resets // 0)] | @tsv' "$f" 2>/dev/null
-    done | sort -t$'\t' -k1,1nr -k3,3n | head -1)"
+    done)"
+  [ -n "$rows" ] || return 1
+  cur="$(awk -F'\t' '$4 != 0' <<< "$rows" | sort -t$'\t' -k3,3n | head -1 | cut -f4)"
+  # 60s of slack: the same window is reported to the second, two accounts' never align.
+  best="$(awk -F'\t' -v c="${cur:-0}" 'c == 0 || $4 == 0 || ($4 - c <= 60 && c - $4 <= 60)' <<< "$rows" \
+          | sort -t$'\t' -k1,1nr -k3,3n | head -1)"
+  dropped="$(awk -F'\t' -v c="${cur:-0}" 'c != 0 && $4 != 0 && ($4 - c > 60 || c - $4 > 60)' <<< "$rows" | grep -c . || true)"
   [ -n "$best" ] || return 1
   local pct who age resets
   IFS=$'\t' read -r pct who age resets <<< "$best"
   BUDGET_PCT="$pct"
   BUDGET_FROM="from the mod: $who, read ${age}s ago$([ "$resets" != 0 ] && printf ', window resets %s' "$(date -r "$resets" +%H:%M 2>/dev/null || date -d "@$resets" +%H:%M 2>/dev/null)")"
+  [ "${dropped:-0}" -gt 0 ] && BUDGET_FROM="$BUDGET_FROM; ignored ${dropped} reading(s) from another window (the login changed)"
+  return 0
 }
 budget() {
   local p="" s="" w=""

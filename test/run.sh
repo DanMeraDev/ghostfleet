@@ -4140,6 +4140,31 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
        "$(mdgov | grep -c 'budget 37% (healthy) — from the mod: dead, read 4[0-9]s ago' || true)"
     jq --argjson n "$NOWS" '.usage.limits.five_hour.resets = ($n - 1)' "$MD/id-dead.json" > "${MD:?}/x" && mv "${MD:?}/x" "${MD:?}/id-dead.json"
     is "mod: ...and ignores it once its window has reset" "0" "$(mdgov | grep -c 'from the mod' || true)"
+
+    # TWO WINDOWS AT ONCE ARE TWO ACCOUNTS, and only the newest reading's is the one in use.
+    # One account's 5h windows never overlap, so readings carrying different `resets` that
+    # are both still in the future cannot both be this account now — the profile's login
+    # changed between them. The max across them is then not a lower bound on anything:
+    # measured live, an old window's 99% (from sessions the governor had itself parked, so
+    # they never repainted) outvoted a fresh 54-61% from every session that had run in the
+    # last minutes, and every worker in four fleets was re-parked within a minute of each
+    # hand resume. Three directions, so "take the newest window" cannot pass as the rule:
+    # the window of the FRESHEST reading wins, and inside it the max still does.
+    mdset() {  # slot pct age-s resets-in-s
+      jq --argjson n "$NOWS" --argjson p "$2" --argjson a "$3" --argjson r "$4" \
+        '. + {usage: {at: ($n - $a), limits: {five_hour: {pct: $p, resets: ($n + $r)}}}}' \
+        "$MD/id-$1.json" > "${MD:?}/x" && mv "${MD:?}/x" "${MD:?}/id-$1.json"; }
+    mdgov0() { env -u TMUX CLAUDE_FLEET_DIR="$MD" "$ROOT/bin/fleet-governor" -s cfmodtest --once --dry-run --no-resource --confirm 0 2>&1; }
+    mdsaid() { local out; out="$(mdgov0)"; [ "$(grep -cE -- "$1" <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0; }
+    mdset dead 99 10000 2000;  mdset live 55 30 12000
+    is "mod: a fresh reading in another window outvotes an old window's higher one" "1" \
+       "$(mdsaid 'budget 55% .*from the mod: live')"
+    mdset dead 99 20 2000;     mdset live 55 10000 12000
+    is "mod: ...the FRESHEST reading's window, not the latest-resetting one" "1" \
+       "$(mdsaid 'budget 99% .*from the mod: dead')"
+    mdset dead 70 5000 3600;   mdset live 40 30 3600
+    is "mod: ...and inside one window an older, higher reading still counts" "1" \
+       "$(mdsaid 'budget 70% .*from the mod: dead')"
     tmux -L cfmodtest kill-server 2>/dev/null
   else
     skip "mod: grid, fleet-list and governor" "tmux missing"
