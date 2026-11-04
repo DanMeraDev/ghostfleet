@@ -19,6 +19,7 @@ import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
+import { avisoLine, avisoTitle, avisoTake, avisoBurst } from './avisos.js';
 // The desk's own matcher for `/` — one answer to "which cards does `bil` mean" (see the file).
 import { matchIndices, stepMatch, sessionMatches } from './grid-search.js';
 // THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
@@ -216,6 +217,7 @@ async function refreshOnce() {
   // that is already running rather than waiting for someone to open the settings sheet.
   maybeSyncPush();
   maybePushOffer();
+  avisoOfferCheck();
   // A tapped notification from Jarvis, once there is a session to open it with.
   // Not while an unwind is still on its way (setDepth): the entry a deep link pushes would
   // land above the trail the pop is about to remove, and the pop would then take it back.
@@ -2181,7 +2183,10 @@ async function maybePushOffer() {
   render();
 }
 function notifySpec() {
-  if (!S.pushOffer) return null;
+  // AT A DESK THE TAB'S OWN AVISOS ARE ASKED FOR FIRST: the push band speaks of "this phone",
+  // and one tap on either grants the same permission. The push stays in settings.
+  const av = avisoOfferSpec();
+  if (av || !S.pushOffer) return av;
   return {
     text: "Turn on notifications — so a blocked session, or Jarvis's answer, reaches this phone when the app is closed.",
     enable: 'Turn on notifications', later: 'not now',
@@ -5828,6 +5833,169 @@ async function shellVersionOrGuess() {
   return 'ghostfleet-push';
 }
 
+// ── avisos: a desk tab rings for itself ─────────────────────────────────────
+// fleet-serve suppresses the push for a client that polled within quiet_after_poll, and a
+// desk tab polls whether or not anyone is looking at it — so the person in another window
+// heard nothing when a worker finished or blocked, and sat waiting. The push's own events
+// now reach the tab (/api/avisos), and the tab says them: the title counts what is unseen,
+// the favicon gets a dot, a sound rings once per burst, and with the tab out of focus a
+// desktop notification carries the same line. What to say and when is web/avisos.js, pure
+// and tabled; this is only the DOM half.
+//   AT A DESK ONLY (a fine pointer that hovers). A phone has the push, and a sound from a
+// phone app that is merely open would take the owner's audio session — the music rule in
+// unlockAudio().
+//   THIS POLL OUTLIVES A HIDDEN TAB, unlike every other one here, because a hidden tab is the
+// case it exists for: the person went to another tab. That keeps the token sliding while
+// hidden, which would quietly retire "come back after the idle window and the passkey is
+// asked again" — so a return after a hidden stretch longer than the token's window drops
+// the token first (avisoReturn), and the resume locks exactly as it would have.
+const LS_AVISO_MUTE = 'gf.avisos.mute';      // '1' = no sound; per device, survives a reload
+const LS_AVISO_LATER = 'gf.avisos.later';
+const SS_AVISO_MARK = 'gf.avisos.mark';      // per TAB: { boot, last, at } — already announced
+const AVISO_EVERY = 10000;
+const AV = { pending: [], mark: null, lastAt: 0, base: '', polledHidden: false, note: null, busy: false, offer: false };
+const avisoDesk = () => finePointer() && typeof document !== 'undefined';
+const avisoMuted = () => { try { return localStorage.getItem(LS_AVISO_MUTE) === '1'; } catch { return false; } };
+function avisoSetMuted(v) { try { v ? localStorage.setItem(LS_AVISO_MUTE, '1') : localStorage.removeItem(LS_AVISO_MUTE); } catch {} }
+const avisoPerm = () => { try { return typeof Notification === 'undefined' ? 'unsupported' : Notification.permission; } catch { return 'unsupported'; } };
+// Looking = this tab is on screen AND has the keyboard. A visible tab in a window behind
+// another is not being looked at, which is the whole reason this exists.
+const avisoLooking = () => !document.hidden && (typeof document.hasFocus !== 'function' || document.hasFocus());
+function avisoLoad() {
+  if (AV.mark) return;
+  try { const j = JSON.parse(sessionStorage.getItem(SS_AVISO_MARK) || 'null'); if (j && j.boot) { AV.mark = { boot: j.boot, last: j.last }; AV.lastAt = Number(j.at) || 0; } } catch {}
+}
+function avisoSave() {
+  try { if (AV.mark) sessionStorage.setItem(SS_AVISO_MARK, JSON.stringify({ ...AV.mark, at: AV.lastAt })); } catch {}
+}
+function avisoPaint() {
+  if (!AV.base) AV.base = document.title || 'ghostfleet';
+  document.title = avisoTitle(AV.base, AV.pending);
+  try {
+    const link = document.querySelector('link[rel="icon"]');
+    const want = AV.pending.length ? './icons/icon-aviso.png' : './icons/icon-192.png';
+    if (link && link.getAttribute('href') !== want) link.setAttribute('href', want);
+  } catch {}
+}
+// Back on the tab with the keyboard: everything is seen.
+function avisoSeen() {
+  if (!avisoLooking()) return;
+  if (AV.pending.length) { AV.pending = []; avisoPaint(); }
+  try { if (AV.note) AV.note.close(); } catch {}
+  AV.note = null;
+}
+// TWO SOUNDS, BUILT HERE rather than shipped: oscillators through the app's own context,
+// so there is no file to precache and nothing for the CSP to refuse. "Terminó" is one soft
+// sine note; "te necesita" is three rising triangle notes, louder — told apart without
+// looking. A desk browser lets a context run once the page has had any click (the button
+// that turned these on is one), and a context released after the voice is simply rebuilt.
+function avisoSound(kind) {
+  if (avisoMuted()) { console.info(`[avisos] sonido ${kind} (silenciado)`); return; }
+  const c = audioCtx();
+  if (!c) return;
+  try {
+    if (c.state !== 'running') c.resume();
+    const notes = kind === 'needs' ? [[659, 0], [880, 0.13], [1175, 0.26]] : [[880, 0]];
+    const peak = kind === 'needs' ? 0.16 : 0.07, wave = kind === 'needs' ? 'triangle' : 'sine';
+    const t0 = c.currentTime + 0.02;
+    for (const [hz, at] of notes) {
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = wave; o.frequency.value = hz;
+      g.gain.setValueAtTime(0.0001, t0 + at);
+      g.gain.exponentialRampToValueAtTime(peak, t0 + at + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + (kind === 'needs' ? 0.22 : 0.35));
+      o.connect(g); g.connect(c.destination);
+      o.start(t0 + at); o.stop(t0 + at + 0.4);
+    }
+    console.info(`[avisos] sonido ${kind}`);
+  } catch (e) { console.info(`[avisos] sonido ${kind} falló: ${e && e.message}`); }
+}
+// A tap on the notification brings this tab forward and opens what it was about: the queue
+// for a master's held item (as a tapped push does), the session otherwise.
+function avisoOpen(ev) {
+  try { window.focus(); } catch {}
+  if (!ev || S.locked) return;
+  if (ev.kind === 'waiting') { S.wantWaiting = true; refresh(); return; }
+  if (S.project !== ev.project) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
+  S.project = ev.project; S.sub = ''; S.foundBack = null;
+  openSession(ev.session, { depth: 1, entry: 'projects' });
+}
+function avisoNotify() {
+  if (avisoPerm() !== 'granted' || !AV.pending.length) return;
+  const last = AV.pending[AV.pending.length - 1];
+  const n = AV.pending.length;
+  const title = `${n > 1 ? `(${n}) ` : ''}${avisoLine(last)}`;
+  try {
+    // One notification at a time, replaced rather than stacked: `tag` makes the next burst
+    // take this one's place, so a desk does not collect a column of them.
+    const note = new Notification(title, { body: AV.base || 'ghostfleet', tag: 'gf-aviso', icon: './icons/icon-192.png' });
+    note.onclick = () => { try { note.close(); } catch {} avisoOpen(last); };
+    AV.note = note;
+    console.info(`[avisos] notificación: ${title}`);
+  } catch (e) { console.info(`[avisos] notificación falló: ${e && e.message}`); }
+}
+async function avisoPoll() {
+  if (AV.busy || !avisoDesk() || S.locked || !api.haveToken() || api.mode() !== 'server') return;
+  AV.busy = true;
+  try {
+    avisoLoad();
+    const feed = await api.getAvisos(AV.mark && AV.mark.last, AV.mark && AV.mark.boot);
+    if (!feed) return;
+    if (document.hidden) AV.polledHidden = true;
+    const { fresh, mark } = avisoTake(AV.mark, feed);
+    AV.mark = mark;
+    if (fresh.length) {
+      const looking = avisoLooking();
+      if (!looking) { AV.pending.push(...fresh); avisoPaint(); }
+      const b = avisoBurst(AV.lastAt, fresh, Math.floor(Date.now() / 1000), Number(feed.debounce) || 30);
+      AV.lastAt = b.lastAt;
+      if (b.ring) {
+        avisoSound(b.ring);
+        if (!looking) avisoNotify();
+      }
+    }
+    avisoSave();
+  } catch {} finally { AV.busy = false; }
+}
+// The return from a hidden stretch: if it outlasted the token's idle window, the token
+// would have died had this poll not kept it alive, so it is dropped here and the resume
+// locks as it always did. Called before onVisibleAction() reads haveToken().
+function avisoReturn(hiddenFor) {
+  const kept = AV.polledHidden;
+  AV.polledHidden = false;
+  if (kept && hiddenFor > pk.TOKEN_TTL * 1000) api.clearToken();
+}
+// THE BUTTON, AND ONLY THE BUTTON, asks for permission: a prompt raised on load or from a
+// timer is refused by browsers and teaches the owner to click "block". The same tap starts
+// the audio context, so the first sound is not swallowed by the autoplay rule.
+async function avisoEnable() {
+  unlockAudio();
+  try { if (avisoPerm() === 'default') await Notification.requestPermission(); } catch {}
+  AV.offer = false;
+  const p = avisoPerm();
+  toast(p === 'granted' ? 'avisos activados en esta pestaña' : p === 'denied'
+    ? 'el navegador bloqueó las notificaciones; el título y el sonido siguen avisando' : 'avisos: solo título y sonido', p === 'granted' ? 'good' : '');
+  render();
+}
+// The one-tap band on Projects, at a desk whose browser has not been asked yet. "Ahora no"
+// holds for three days, as the push's own band does.
+function avisoOfferCheck() {
+  if (AV.offer || !avisoDesk() || avisoPerm() !== 'default' || api.mode() !== 'server') return;
+  let later = 0;
+  try { later = Number(localStorage.getItem(LS_AVISO_LATER)) || 0; } catch {}
+  if (Date.now() - later < 3 * 86400 * 1000) return;
+  AV.offer = true;
+}
+function avisoOfferSpec() {
+  if (!AV.offer || avisoPerm() !== 'default') return null;
+  return {
+    text: 'Avisos en esta pestaña: un sonido y una notificación cuando un worker termina o te necesita.',
+    enable: 'Activar avisos', later: 'ahora no',
+    onEnable: () => avisoEnable(),
+    onLater: () => { try { localStorage.setItem(LS_AVISO_LATER, String(Date.now())); } catch {} AV.offer = false; render(); },
+  };
+}
+
 // Set when a newer service worker has taken control and this page is now the stale one.
 let swReloadPending = false;
 // WHEN IT IS FREE TO SWAP CLIENTS, as a value rather than as a condition inside the
@@ -7794,6 +7962,25 @@ async function sheetSettings() {
     pk.registered() ? btn('forget this device\'s passkey', () => { pk.forget(); toast('forgotten — a lost phone is revoked server-side too', 'good'); closeSheet(); }, 'danger') : null,
   ].filter(Boolean)));
 
+  // ── avisos en esta pestaña (desk only — see "avisos") ─────────────────────
+  if (avisoDesk()) {
+    const perm = avisoPerm(), muted = avisoMuted();
+    kids.push(el('h2', { text: 'avisos en esta pestaña' }));
+    kids.push(el('p', { text: 'cuando un worker termina o te necesita: el título cuenta lo que no has visto, suena una vez por ráfaga y, si estás en otra ventana, sale una notificación.' }));
+    kids.push(el('p', { class: 'dim small', text: perm === 'granted' ? 'notificaciones: activadas'
+      : perm === 'denied' ? 'notificaciones: bloqueadas en el navegador (el título y el sonido siguen)'
+      : perm === 'unsupported' ? 'notificaciones: este navegador no las tiene' : 'notificaciones: sin activar' }));
+    kids.push(el('div', { class: 'row' }, [
+      perm === 'default' ? btn('Activar avisos', () => { avisoEnable(); closeSheet(); }, 'go') : null,
+      btn(muted ? 'Sonido: silenciado' : 'Sonido: activado', () => {
+        avisoSetMuted(!muted);
+        if (muted) unlockAudio();
+        toast(muted ? 'sonido de avisos activado' : 'sonido de avisos silenciado', 'good');
+        closeSheet(); sheetSettings();
+      }),
+    ].filter(Boolean)));
+  }
+
   // ── notifications ───────────────────────────────────────────────────────
   // SAY WHICH STATE IT IS IN. Every branch here is a state someone can be standing in
   // with a phone, and the one that has to be named out loud is the tab: on iOS a Safari
@@ -8414,6 +8601,10 @@ document.addEventListener('visibilitychange', () => {
     if (S.talk) talkStop('conversation mode stopped — it only works with the screen on and the app open');
     return;
   }
+  // Before the decision: a hidden stretch the avisos poll kept the token alive through is
+  // judged as if it had not (avisoReturn), and a tab come back to is a tab whose avisos are seen.
+  avisoReturn(Date.now() - hiddenAt);
+  avisoSeen();
   const act = onVisibleAction();
   if (!hidByCeremony && act !== 'wait') pk.arm();
   usageSoon();   // a resume reads the accounts again on the next poll
@@ -8435,6 +8626,8 @@ addEventListener('focus', usageSoon);
 // focus joins a read that is already out unless that read has been out too long to wait for.
 addEventListener('pageshow', (e) => { if (e && e.persisted) resumeChat(true); });
 addEventListener('focus', () => resumeChat(true));
+// A desk window brought to the front hides nothing, so `focus` is its only "seen".
+addEventListener('focus', avisoSeen);
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
 // until something re-navigates — and the first re-navigation runs the OLD app.js while the
 // new one installs behind it, so it takes TWO cold opens to pick up a fix. Measured: a
@@ -8505,5 +8698,7 @@ setInterval(() => {
   if (renderDeferred) { renderDeferred = false; render(); }
   refresh();
 }, 5000);
+// The avisos poll: its own clock, and NOT paused while hidden — see "avisos" above.
+setInterval(avisoPoll, AVISO_EVERY);
 
 

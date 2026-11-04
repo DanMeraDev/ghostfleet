@@ -436,6 +436,15 @@ export async function getWaiting() {
   return { ...j, items };
 }
 
+// fleet-serve /api/avisos: the push's own events, for a desk tab (web/avisos.js). Null where
+// there is no feed — fixtures, or a daemon older than it (404) — which is "no avisos", not
+// an error: the tab simply stays quiet, as it did before.
+export async function getAvisos(after, boot) {
+  if ((await ready()).mode !== 'server') return null;
+  try { return await get(`/api/avisos?after=${encodeURIComponent(after || 0)}&boot=${encodeURIComponent(boot || '')}`); }
+  catch (e) { if (e && e.status === 404) return null; throw e; }
+}
+
 // ── the Claude accounts each profile runs on ───────────────────────────────
 // fleet-serve /api/usage: `fleet-accounts list`'s data for the profiles the daemon lists. A
 // daemon older than the line answers 404, which is "no line", like the two above. The fixture

@@ -93,20 +93,27 @@ const { w, h, on } = bitmap(shipRows());
 // `pad` is the fraction of the canvas left as background around the sprite. A maskable
 // icon is cropped to a circle by the launcher, so the safe zone is the middle 80% —
 // 0.18 keeps the whole ship inside it at every size below.
-function draw(size, pad = 0.18) {
+// `dot` is the tab's "something is waiting for you" favicon (web/app.js, avisos): the same
+// ship with a filled circle in the top-right corner, which is what a tab strip shows at
+// 16px. A file rather than a canvas: the CSP is `default-src 'self'`, so a data: URL
+// favicon is refused.
+const DOT = [0xff, 0x8a, 0x3d];
+function draw(size, pad = 0.18, dot = false) {
   const inner = size * (1 - pad * 2);
   const scale = Math.max(1, Math.floor(Math.min(inner / w, inner / h)));
   const dw = w * scale, dh = h * scale;
   const ox = Math.floor((size - dw) / 2), oy = Math.floor((size - dh) / 2);
+  const r = size * 0.22, cx = size - r - size * 0.02, cy = r + size * 0.02;
   return png(size, size, (x, y) => {
+    if (dot && (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= r * r) return DOT;
     const sx = Math.floor((x - ox) / scale), sy = Math.floor((y - oy) / scale);
     if (sx < 0 || sy < 0 || sx >= w || sy >= h) return BG;
     return on[sy][sx] ? FG : BG;
   });
 }
 
-for (const [file, size] of [['icon-192.png', 192], ['icon-512.png', 512], ['apple-touch-icon.png', 180]]) {
+for (const [file, size, dot] of [['icon-192.png', 192], ['icon-512.png', 512], ['apple-touch-icon.png', 180], ['icon-aviso.png', 192, true]]) {
   const out = path.join(HERE, file);
-  fs.writeFileSync(out, draw(size));
+  fs.writeFileSync(out, draw(size, 0.18, !!dot));
   console.log(`${file}  ${size}×${size}  ${fs.statSync(out).size} bytes`);
 }

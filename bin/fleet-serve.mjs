@@ -1924,13 +1924,49 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status }) {
 }
 let pushHeld = [];
 
+// ── the same events, for a page that is open (web/app.js, avisos) ───────────
+// A DESK TAB NEVER GETS A PUSH, and that is the suppression above working as designed: the
+// tab polls, so quiet_after_poll reads it as "he is looking", while he is in another window
+// and a worker sits finished for an hour. The answer is not to loosen the suppression (the
+// phone needs it) but to hand the tab the events themselves, so the PAGE can ring. Same
+// scan, same transitions, same baseline rule — this ring is filled from `fresh` in
+// pushTick, never from a second reader that could disagree with the push about what
+// happened.
+//   Each entry goes through pushPayload() one event at a time and keeps only its `sessions`
+// row, so the tab is told exactly what a lock screen may be told: a kind and two names that
+// passed NAME_OK. An account notice has no session row and so never reaches it. The marker
+// of an undelivered wake does — it arrives as a need-you for the lead, as it does on a phone.
+//   `boot` tells a tab that the ids started again: a tab holding last=40 from the daemon
+// before a restart would otherwise wait for id 41 while ids 1..40 went by unannounced.
+export const FEED_KEEP = 50;
+export function feedAppend(feed, events) {
+  for (const ev of events) {
+    const row = (pushPayload([ev], 'named').sessions || [])[0];
+    if (!row || ev.kind === 'account') continue;
+    feed.ring.push({ id: ++feed.last, at: now(), kind: row.kind, project: row.project, session: row.session });
+  }
+  if (feed.ring.length > FEED_KEEP) feed.ring.splice(0, feed.ring.length - FEED_KEEP);
+  return feed;
+}
+export function feedSince(feed, after, boot) {
+  const from = String(boot) === String(feed.boot) ? Number(after) || 0 : 0;
+  return { boot: feed.boot, last: feed.last, events: feed.ring.filter(e => e.id > from) };
+}
+const pageFeed = { boot: String(Date.now()), last: 0, ring: [] };
+// The scan is not free, so it runs for the page only while a page is asking: a tab that
+// stopped reading /api/avisos this long ago (closed, or its token died) stops the scan
+// exactly as an absent subscription does.
+const FEED_IDLE = 120;
+let feedReadAt = 0;
+
 async function pushTick() {
   let c;
   try { c = loadConfig(); } catch { return; }
   const subs = allSubs();
-  // Nothing subscribed: do no work at all, and forget the baseline so the first
-  // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); accountSizes.clear(); waitingSeen.clear(); pushHeld = []; return; }
+  const feeding = now() - feedReadAt < FEED_IDLE;
+  // Nothing subscribed and no page reading: do no work at all, and forget the baseline so
+  // the first subscription starts from what is on disk instead of replaying the day.
+  if (!subs.length && !feeding) { pushState.clear(); undeliveredSizes.clear(); accountSizes.clear(); waitingSeen.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
@@ -1938,6 +1974,10 @@ async function pushTick() {
   const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
   const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names),
                  ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen)];
+  // The page's copy, BEFORE any of the push's holds and windows: those are about a phone's
+  // lock screen, and the tab applies its own burst rule to what it hears (web/avisos.js).
+  feedAppend(pageFeed, fresh);
+  if (!subs.length) { pushHeld = []; return; }
   if (!fresh.length && !pushHeld.length) return;
   // AT THE MAC: what would have been sent is held instead, and what was held goes when he
   // leaves (see holdStep). Read only when there is something to decide, and once per tick.
@@ -2938,6 +2978,17 @@ function agentCatalogue() {
       text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000),
       // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
       ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) }))] }, await fan));
+  }
+
+  // A page's avisos: what pushTick saw since `after` (see "the same events, for a page").
+  // Reading it is what keeps the scan running for a tab with no push subscription. This
+  // host's fleets only: a paired host's ids are its own and do not fan out.
+  //   `debounce` is the push's own window, so the tab's "one sound per burst" and the
+  // phone's "one buzz per burst" are one setting.
+  if (p === '/api/avisos' && req.method === 'GET') {
+    feedReadAt = now();
+    return send(res, 200, { ok: true, debounce: Number(c.push.debounce ?? 30),
+      ...feedSince(pageFeed, url.searchParams.get('after'), url.searchParams.get('boot')) });
   }
 
   // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:

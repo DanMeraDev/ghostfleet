@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 3b04a201f65d
+// CLIENT-HASH: 3d282f116540
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -432,10 +432,13 @@
 // shows the queue without it.
 // v94 lets a photo go to another machine's session: the camera no longer refuses a project
 // on a paired machine. A phone on v93 still says a photo does not cross.
-const VERSION = 'ghostfleet-v94';
+// v95 gives a desk tab its own avisos (web/avisos.js): the title counts what finished or
+// needs you, the favicon gets a dot, a sound rings once per burst and, with the tab out of
+// focus, a desktop notification. A tab on v94 stays silent while the push stays suppressed.
+const VERSION = 'ghostfleet-v95';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
-  './ansi.js', './md.js', './grid-search.js',
+  './ansi.js', './md.js', './grid-search.js', './avisos.js',
   // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
   // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
   // which is what lets them sit in this hand-written list at all — see vite.config.mjs,
@@ -448,7 +451,7 @@ const SHELL = [
   // after a deploy until it happens to be online is that half.
   './term.js', './xterm.js', './xterm-fit.js', './xterm.css',
   './manifest.webmanifest',
-  './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
+  './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './icons/icon-aviso.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
   './fixtures/grid-acme-api.json', './fixtures/grid-acme-api-sub-cache-keys.json', './fixtures/grid-degraded.json',
   './fixtures/grid-free.json', './fixtures/grid-empty.json',

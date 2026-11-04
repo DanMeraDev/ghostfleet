@@ -19331,6 +19331,29 @@ else
   skip "push hold" "node missing"
 fi
 
+# A DESK TAB NEVER GOT A PUSH: it polls, so quiet_after_poll read it as "he is looking"
+# while he sat in another window. The tab now reads the push's own events (/api/avisos)
+# and rings itself. test/helpers/avisos-check.mjs drives both halves as a table — the
+# daemon's ring (only what a lock screen may carry, bounded, a restart's ids told apart)
+# and web/avisos.js (the title, "already announced" across a reload, one sound per burst).
+# Each rule was watched red: a no-mark tab replaying the ring, a burst rule with no window,
+# the title showing the oldest reason, the boot ignored, a master named "master", an event
+# spread into the ring, and the bound taken off.
+group "avisos: a desk tab's title, its sound per burst, and what it has already announced"
+if command -v node >/dev/null 2>&1; then
+  PA="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$PA/home"
+  HOME="$PA/home" node "$ROOT/test/helpers/avisos-check.mjs" > "$PA/out" 2> "$PA/err"
+  is "avisos-check ran"               "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PA/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PA/out")" -ge 30 ] && echo yes || echo "no: $(wc -l < "$PA/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PA/out"
+  rm -rf "$PA"
+else
+  skip "avisos" "node missing"
+fi
+
 # ── an expired wake reaches the phone ────────────────────────────────────────
 # hooks/fleet-event.sh's deferred wake, at ten minutes of an occupied input box (it goes on holding the wake),
 # and appends to <sock>.<kind>.undelivered. Nothing read that file: a worker sat on a

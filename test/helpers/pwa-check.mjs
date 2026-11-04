@@ -53,7 +53,7 @@ const CSS = read('app.css');
 // thought about once, here, and `readdirSync` would silently adopt anything that appeared.
 // term.js is the terminal screen, and xterm.js / xterm-fit.js are what it drives — vendored
 // from npm and pinned by digest (scripts/vendor-xterm.sh --check, in the suite).
-const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'screens.js', 'preact.js', 'term.js', 'xterm.js', 'xterm-fit.js'];
+const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'avisos.js', 'sw.js', 'screens.js', 'preact.js', 'term.js', 'xterm.js', 'xterm-fit.js'];
 const JS = Object.fromEntries(JS_FILES.map(f => [f, read(f)]));
 
 // ── 1. nothing loads from off this machine ────────────────────────────────
